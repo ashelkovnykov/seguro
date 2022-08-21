@@ -35,6 +35,8 @@ uint32_t add_event_set_transactions(FDBTransaction *tx, FragmentedEvent *event, 
 
 void add_event_clear_transaction(FDBTransaction *tx, FragmentedEvent *event);
 
+uint8_t count_digits(uint64_t n);
+
 //==============================================================================
 // Functions
 //==============================================================================
@@ -296,7 +298,6 @@ int fdb_clear_event_array(FDBDatabase *fdb, FragmentedEvent *events, uint32_t nu
   err = fdb_setup_transaction(fdb, &tx);
   if (err) return err;
 
-
   for (uint32_t i = 0; i < num_events; ++i) {
 
     add_event_clear_transaction(tx, (events + i));
@@ -320,42 +321,27 @@ uint32_t add_event_set_transactions(FDBTransaction *tx, FragmentedEvent *event, 
   uint32_t max_pos = (start_pos + limit);
   uint32_t end_pos = (max_pos < event->num_fragments) ? max_pos : event->num_fragments;
   uint32_t num_kvp = end_pos - start_pos;
-  uint8_t  key[KEY_TOTAL_LENGTH] = { 0 };
-
-  // FoundationDB has a rule that any keys beginning with 0xff access a special key-space, so we need to add a null byte
-  memcpy((key + 1), &(event->key), KEY_EVENT_LENGTH);
-
-  if (!start_pos) {
-    // Setup event with header and payload
-    uint32_t value_length = event->header_length + event->payload_length;
-    uint8_t  value[value_length];
-
-    memcpy(value, event->header, event->header_length);
-    memcpy((value + event->header_length), event->fragments[0], event->payload_length);
-
-// HERE
-// printf("%x %x %x %x %x %x %x %x %x %x %x %x\n", key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7], key[8], key[9], key[10], key[11]);
-
-    // Add write transaction
-    fdb_transaction_set(tx,
-                        key,
-                        KEY_TOTAL_LENGTH,
-                        value,
-                        value_length);
-
-    ++start_pos;
-  }
+  uint8_t  key_digits = count_digits(event->key);
 
   for (uint32_t i = start_pos; i < end_pos; ++i) {
-    // Setup event fragment key
-    memcpy((key + KEY_EVENT_LENGTH + 1), &i, KEY_FRAGMENT_LENGTH);
 
-    // Add write transaction
-    fdb_transaction_set(tx,
-                        key,
-                        KEY_TOTAL_LENGTH,
-                        event->fragments[i],
-                        OPTIMAL_VALUE_SIZE);
+    uint8_t key_length = key_digits + count_digits(i) + 1;
+    uint8_t key[key_length];
+    sprintf((char *)key, "%ld:%d", event->key, i);
+
+    if (end_pos == max_pos) {
+      fdb_transaction_set(tx,
+                          key,
+                          key_length,
+                          event->fragments[i],
+                          event->final_frag_length);
+    } else {
+      fdb_transaction_set(tx,
+                          key,
+                          key_length,
+                          event->fragments[i],
+                          OPTIMAL_VALUE_SIZE);
+    }
   }
 
   return num_kvp;
@@ -363,20 +349,33 @@ uint32_t add_event_set_transactions(FDBTransaction *tx, FragmentedEvent *event, 
 
 void add_event_clear_transaction(FDBTransaction *tx, FragmentedEvent *event) {
 
-  uint8_t  range_start_key[KEY_TOTAL_LENGTH] = { 0 };
-  uint8_t  range_end_key[KEY_TOTAL_LENGTH];
+  uint8_t key_digits = count_digits(event->key);
+  uint8_t start_key_length = key_digits + 2;
+  uint8_t end_key_length = key_digits + count_digits(event->num_fragments - 1) + 1;
+  uint8_t start_key[start_key_length];
+  uint8_t end_key[end_key_length];
 
-  //
-  memcpy((range_start_key + 1), &event->key, KEY_EVENT_LENGTH);
+  sprintf((char *)start_key, "%ld:0",  event->key);
+  sprintf((char *)end_key,   "%ld:%d", event->key, (event->num_fragments - 1));
 
-  //
-  memcpy((range_end_key + 1), &event->key, KEY_EVENT_LENGTH);
-  memcpy((range_end_key + KEY_EVENT_LENGTH + 1), &event->num_fragments, KEY_FRAGMENT_LENGTH);
-
-  //
   fdb_transaction_clear_range(tx,
-                              range_start_key,
-                              KEY_TOTAL_LENGTH,
-                              range_end_key,
-                              KEY_TOTAL_LENGTH);
+                              start_key,
+                              start_key_length,
+                              end_key,
+                              end_key_length);
+}
+
+uint8_t count_digits(uint64_t n) {
+
+  if (n == 0) {
+    return 1;
+  }
+
+  uint8_t count = 0;
+  while (n != 0) {
+    n = n / 10;
+    ++count;
+  }
+
+  return count;
 }

@@ -25,9 +25,7 @@ typedef struct event_t {
 typedef struct fragmented_event_t {
   uint64_t   key;
   uint32_t   num_fragments;
-  uint8_t    header[MAX_HEADER_SIZE];
-  uint8_t    header_length;
-  uint16_t   payload_length;
+  uint16_t   final_frag_length;
   uint8_t  **fragments;
 } FragmentedEvent;
 
@@ -37,7 +35,12 @@ typedef struct fragmented_event_t {
 
 void fragment_event(Event *event, FragmentedEvent *f_event);
 
-uint8_t build_fragment_header(uint8_t *header, uint32_t num_fragments);
+void build_fragment_header(uint8_t *fragment,
+                           uint16_t header_length,
+                           uint32_t num_fragments,
+                           uint32_t current_fragment);
+
+uint32_t get_payload_length(uint64_t data_length);
 
 void free_event(Event *event);
 

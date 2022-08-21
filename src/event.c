@@ -17,70 +17,68 @@
 
 void fragment_event(Event *event, FragmentedEvent *f_event) {
 
-  uint32_t num_fragments;
-  uint16_t payload_length;
-  uint8_t  header_length;
+  uint16_t payload_length = get_payload_length(event->data_length);
+  uint32_t num_fragments = (event->data_length / payload_length);
+  uint32_t simple_fragments = num_fragments;
+  uint16_t final_frag_length = (event->data_length % payload_length);
+  uint16_t  header_length = (OPTIMAL_VALUE_SIZE - payload_length);
 
-  // Split event into as many optimally sized fragments as possible, and always put the oddly-sized portion at the
-  // front. Thus, every fragment after the first one will be exactly OPTIMAL_VALUE_SIZE bytes long, whereas the payload
-  // of the first fragment may be as small as 1 byte or as large as (OPTIMAL_VALUE_SIZE + MAX_HEADER_SIZE) bytes.
-  num_fragments  = (event->data_length / OPTIMAL_VALUE_SIZE);
-  payload_length = (event->data_length % OPTIMAL_VALUE_SIZE);
-
-  // Probably possible to tune the tolerances here (e.g. "if # leftover bytes < 1000, append to payload")
-  if (!payload_length) {
-    payload_length = OPTIMAL_VALUE_SIZE;
-  } else {
+  if (final_frag_length) {
+    final_frag_length += header_length;
     ++num_fragments;
   }
 
   uint8_t **fragments = (uint8_t **) malloc(sizeof(uint8_t *) * num_fragments);
-  fragments[0] = event->data;
-  for (uint32_t i = 1; i < num_fragments; ++i) {
-    fragments[i] = (event->data + payload_length + ((i - 1) * OPTIMAL_VALUE_SIZE));
+  for (uint32_t i = 0; i < simple_fragments; ++i) {
+    fragments[i] = (uint8_t *) malloc(sizeof(uint8_t) * OPTIMAL_VALUE_SIZE);
+    memcpy((fragments[i] + header_length), (event->data + (i * payload_length)), payload_length);
+    build_fragment_header(fragments[i], header_length, num_fragments, i);
   }
 
-  // Need the number of ADDITIONAL fragments for header
-  header_length = build_fragment_header(f_event->header, num_fragments - 1);
+  if (simple_fragments != num_fragments) {
+    fragments[simple_fragments] = (uint8_t *) malloc(sizeof(uint8_t) * final_frag_length);
+    memcpy((fragments[simple_fragments] + header_length), (event->data + (simple_fragments * payload_length)), final_frag_length);
+    build_fragment_header(fragments[simple_fragments], header_length, num_fragments, simple_fragments);
+  }
 
   f_event->key = event->key;
   f_event->num_fragments = num_fragments;
-  f_event->header_length = header_length;
-  f_event->payload_length = payload_length;
+  f_event->final_frag_length = final_frag_length;
   f_event->fragments = fragments;
 }
 
-uint8_t build_fragment_header(uint8_t *header, uint32_t num_fragments) {
-  //
-  // HEADER   MAX # FRAGS   MAX EVENT SIZE
-  // 1 byte   128                1280000 bytes (  1.28 MB)
-  // 2 byte   256                2560000 bytes (  2.56 MB)
-  // 3 byte   65536            655360000 bytes (655.36 MB)
-  // 4 byte   16777216      167772160000 bytes (~168 GB)
-  // ...
-  //
-  // Thus, the header size is determined by the number of fragments necessary to store the event (which is indirectly
-  // tied to the OPTIMAL_VALUE_SIZE macro [10,000 bytes for FDB]). We can also set an upper limit using the
-  // MAX_HEADER_SIZE macro for event sizes we expect to never be reached (e.g. maximum header size of 4 if we never
-  // expect to see an event larger than ~168GB).
-  //
-  if (num_fragments < 128) {
-    header[0] = ((uint8_t *) &num_fragments)[0];
-    return 1;
-  }
+void build_fragment_header(uint8_t *fragment,
+                           uint16_t header_length,
+                           uint32_t num_fragments,
+                           uint32_t current_fragment) {
 
-  for (uint8_t i = 1; i < (MAX_HEADER_SIZE - 1); ++i) {
-    if (num_fragments < ((uint32_t)(1 << (i * 8)))) {
-      header[0] = (EXTENDED_HEADER & i);
-      memcpy((header + 1), &num_fragments, i);
-      return (i + 1);
+  uint8_t i = 0;
+  uint8_t x = (uint8_t)((header_length - 2) / 2);
+
+  if (header_length == 4) {
+    fragment[i++] = (uint8_t)num_fragments;
+    i = 1;
+  } else {
+    fragment[i++] = (EXTENDED_HEADER & x);
+    for (int j = (x - 2); j >= 0; --j) {
+      fragment[i++] = ((uint8_t *)(&current_fragment))[j];
     }
   }
 
-  // Technically this is wrong if num_fragments >= 2^24
-  header[0] = (EXTENDED_HEADER & (MAX_HEADER_SIZE - 1));
-  memcpy((header + 1), &num_fragments, (MAX_HEADER_SIZE - 1));
-  return MAX_HEADER_SIZE;
+  fragment[i++] = ':';
+
+  for (int j = (x - 1); j >= 0; --j) {
+    fragment[i++] = ((uint8_t *)(&num_fragments))[j];
+  }
+
+  fragment[i++] = ':';
+}
+
+uint32_t get_payload_length(uint64_t data_length) {
+  return (data_length <= 1269492)   ? 9996 :
+         (data_length <= 2548470)   ? 9994 :
+         (data_length <= 654825720) ? 9992 :
+         9990;
 }
 
 void free_event(Event *event) {
@@ -88,5 +86,9 @@ void free_event(Event *event) {
 }
 
 void free_fragmented_event(FragmentedEvent *event) {
+  for (uint32_t i = 0; i < event->num_fragments; ++i) {
+    free((void *) (event->fragments)[i]);
+  }
+
   free((void *) event->fragments);
 }
